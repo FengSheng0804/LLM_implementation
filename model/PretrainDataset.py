@@ -18,12 +18,12 @@ class PretrainDataset(Dataset):
 
     # 加载数据，返回数据列表
     def _load_data(self, path):
-        datas = []
+        samples = []
         with open(path, 'r', encoding='utf-8') as f:
             for line_num, line in enumerate(f, 1):
                 data = json.loads(line.strip())
-                datas.append(data)
-        return datas
+                samples.append(data)
+        return samples
     
     # 获取数据长度
     def __len__(self):
@@ -37,8 +37,8 @@ class PretrainDataset(Dataset):
         返回:
             {
                 "input_ids": torch.Tensor,  # 输入token索引
-                "attention_mask": torch.Tensor,  # 注意力掩码
                 "labels": torch.Tensor  # 语言模型训练标签
+                "loss_mask": torch.Tensor,  # 注意力掩码
             }
         """
         sample = self.samples[index]
