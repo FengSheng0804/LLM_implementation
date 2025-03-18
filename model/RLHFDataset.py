@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from torch.utils.data import Dataset
 
 @dataclass
-class DPODataset(Dataset):
+class RLHFDataset(Dataset):
     jsonl_path: str
     tokenizer: object
     max_length: int

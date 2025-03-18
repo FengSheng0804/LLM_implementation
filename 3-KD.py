@@ -4,18 +4,18 @@ import math
 import torch
 import warnings
 import argparse
-import torch.nn.functional as F
+import torch.nn as nn
 
 from model.MicroLM import MicroLM
+from model.SFTDataset import SFTDataset
 from model.MicroLMConfig import MicroLMConfig
-from model.DPODataset import DPODataset
 
 from torch.optim import AdamW
 from torch import distributed
 from torch.cuda.amp import GradScaler
 from torch.nn.utils import clip_grad_norm_
 from torch.nn.parallel import DistributedDataParallel
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DistributedSampler, DataLoader
 from contextlib import nullcontext
 from transformers import AutoTokenizer
 
@@ -33,42 +33,6 @@ def show_log(log):
 def get_lr(current_step, total_steps, lr):
     return lr / 10 + 0.5 * lr * (1 + math.cos(math.pi * current_step / total_steps))
 
-# 将 logits 转换为概率
-# logits shape: (batch_size, seq_len, vocab_size)
-# labels shape: (batch_size, seq_len)
-# probs shape: (batch_size, seq_len)
-def logits_to_probs(logits, labels):
-    # 计算 log_softmax
-    log_probs = F.log_softmax(logits, dim=2)
-    # 从 log_probs 中取出 labels 对应的概率
-    probs = torch.gather(log_probs, dim=2, index=labels.unsqueeze(2)).squeeze(-1)
-    
-    return probs
-
-# DPO 损失函数
-# ref_probs 和 probs 都是 shape: (batch_size, seq_len)
-def dpo_loss(ref_probs, probs, beta):
-    # 计算每个样本的平均概率
-    ref_probs = ref_probs.mean(dim=1)
-    probs = probs.mean(dim=1)
-
-    # 将 chosen 和 rejected 数据分开
-    batch_size = ref_probs.shape[0]
-    chosen_ref_probs = ref_probs[:batch_size // 2]
-    reject_ref_probs = ref_probs[batch_size // 2:]
-    chosen_probs = probs[:batch_size // 2]
-    reject_probs = probs[batch_size // 2:]
-
-    # 计算 pi_logratios 和 ref_logratios
-    pi_logratios = chosen_probs - reject_probs
-    ref_logratios = chosen_ref_probs - reject_ref_probs
-
-    # 计算 logits 和 loss
-    logits = pi_logratios - ref_logratios
-    loss = -F.logsigmoid(beta * logits)
-
-    return loss.mean()
-
 # 初始化模型
 def init_model(lm_config, args):
     # 初始化分词器
@@ -77,30 +41,23 @@ def init_model(lm_config, args):
     # 初始化模型
     model = MicroLM(lm_config)
 
-    # 如果使用Mixture of Experts，加载预训练模型
+    # 如果使用Mixture of Experts
     moe_path = '_moe' if lm_config.use_moe else ''
 
-    # 加载预训练模型
-    checkpoint = f'{args.output_dir}/full_sft_{lm_config.dim}{moe_path}.pth'
-
-    # 加载预训练模型的参数
+    # 加载SFT模型
+    show_log(f'加载SFT模型：{args.output_dir}/SFT_{lm_config.dim}{moe_path}.pth')
+    checkpoint = f'{args.output_dir}/SFT_{lm_config.dim}{moe_path}.pth'
+    
+    # 加载SFT模型的参数
     state_dict = torch.load(checkpoint, map_location=args.device)
     model.load_state_dict(state_dict, strict=False)
-
-    # 初始化参考模型
-    ref_model = MicroLM(lm_config)
-    ref_model.load_state_dict(state_dict, strict=False)
-    ref_model.eval()
-    ref_model.requires_grad_(False)
 
     # 打印模型参数量
     show_log(f'MicroLM总参数量：{sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.3f} 百万')
 
-    # 将模型和参考模型移动到设备上，放在最后更合理
+    # 将模型放到设备上，放在最后更合理
     model = model.to(args.device)
-    ref_model = ref_model.to(args.device)
-
-    return model, ref_model, tokenizer
+    return model, tokenizer
 
 # 初始化分布式模式
 def init_distributed_mode():
@@ -115,53 +72,35 @@ def init_distributed_mode():
     DEVICE = f"cuda:{ddp_local_rank}"                           # 设置当前进程的设备
     torch.cuda.set_device(DEVICE)
 
-# 训练一个 epoch
+# 训练一个epoch
 def train_epoch(epoch, wandb, iter_per_epoch):
+    loss_function = nn.CrossEntropyLoss(reduction='none')            # 使用交叉熵损失函数，reduction='none'，不对每个样本的损失求平均，保留每个样本的损失
     start_time = time.time()
 
     # 遍历数据加载器
     for step, batch in enumerate(train_loader):
-        # 将数据移动到设备上
-        x_chosen = batch['x_chosen'].to(args.device)
-        x_rejected = batch['x_rejected'].to(args.device)
-        y_chosen = batch['y_chosen'].to(args.device)
-        y_rejected = batch['y_rejected'].to(args.device)
-        mask_chosen = batch['mask_chosen'].to(args.device)
-        mask_rejected = batch['mask_rejected'].to(args.device)
+        # 将数据放到设备上
+        X, Y, loss_mask = batch["input_ids"].to(args.device), batch["labels"].to(args.device), batch["loss_mask"].to(args.device)
 
-        # 将 chosen 和 rejected 数据合并
-        x = torch.cat([x_chosen, x_rejected], dim=0)
-        y = torch.cat([y_chosen, y_rejected], dim=0)
-        mask = torch.cat([mask_chosen, mask_rejected], dim=0)
-
-        # 计算当前的学习率
+        # 计算学习率，根据当前epoch和step计算学习率
         learning_rate = get_lr(epoch * iter_per_epoch + step, args.epochs * iter_per_epoch, args.learning_rate)
-        
-        # 更新学习率
+
+        # 设置优化器的学习率
         for param_group in optimizer.param_groups:
             param_group['lr'] = learning_rate
 
         # 前向传播和损失计算
         with context:
-            # 计算参考模型的输出
-            with torch.no_grad():
-                ref_outputs = ref_model(x)                  # 参考模型的输出
-                ref_logits = ref_outputs.logits             # 参考模型的logits
+            result = model(X)                                   # 前向传播
+            loss = loss_function(
+                result.logits.view(-1, result.logits.size(-1)),
+                Y.view(-1)
+            ).view(Y.size())                                    # 计算损失
+            loss = (loss * loss_mask).sum() / loss_mask.sum()   # 计算平均损失，loss_mask用于加权损失
+            loss += result.aux_loss                             # 因为使用了Mixture of Experts，所以还需要加上aux_loss
+            loss = loss / args.accumulation_steps               # 梯度累积
 
-            # 计算当前模型的输出
-            ref_probs = logits_to_probs(ref_logits, y)
-            ref_probs = ref_probs * mask                    # 参考模型的概率
-            outputs = model(x)                              # 当前模型的输出
-            logits = outputs.logits                         # 当前模型的logits
-            probs = logits_to_probs(logits, y)
-            probs = probs * mask                            # 当前模型的概率
-
-            # 计算损失
-            loss = dpo_loss(ref_probs, probs, beta=0.1)     # DPO损失
-            loss = loss / args.accumulation_steps           # 梯度累积
-
-        # 反向传播和梯度更新
-        scaler.scale(loss).backward()
+        scaler.scale(loss).backward()                           # 反向传播
 
         # 梯度累积与参数更新
         if (step + 1) % args.accumulation_steps == 0:           # 每accumulation_steps次迭代更新一次参数
@@ -186,7 +125,7 @@ def train_epoch(epoch, wandb, iter_per_epoch):
 
             # 如果使用wandb，并且当前进程是主进程，记录日志
             if (wandb is not None) and (not ddp or distributed.get_rank() == 0):
-                wandb.log({"loss": loss,
+                wandb.log({"loss": loss.item() * args.accumulation_steps,
                            "lr": optimizer.param_groups[-1]['lr'],
                            "epoch_Time": spend_time / (step + 1) * iter_per_epoch // 60 - spend_time // 60})
 
@@ -194,7 +133,7 @@ def train_epoch(epoch, wandb, iter_per_epoch):
         if (step + 1) % args.save_interval == 0 and (not ddp or distributed.get_rank() == 0):
             model.eval()
             moe_path = '_moe' if lm_config.use_moe else ''
-            checkpoint = f'{args.output_dir}/rlhf_{lm_config.dim}{moe_path}.pth'
+            checkpoint = f'{args.output_dir}/KD_{lm_config.dim}{moe_path}.pth'
 
             # 如果是分布式训练，则保存module的state_dict，否则保存model的state_dict
             if isinstance(model, DistributedDataParallel):
@@ -206,33 +145,33 @@ def train_epoch(epoch, wandb, iter_per_epoch):
             torch.save(state_dict, checkpoint)
             model.train()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     # 设置随机种子
     torch.manual_seed(2004)
 
-    parser = argparse.ArgumentParser(description="MircoLM Reinforcement Learning from Human Feedback")
-    parser.add_argument("--epochs", type=int, default=2)                                                # 训练的轮数
-    parser.add_argument("--num_workers", type=int, default=1)                                           # 数据加载器的工作数量
-    parser.add_argument("--batch_size", type=int, default=8)                                            # batch size
-    # sft阶段学习率为 「5e-6」->「5e-7」长度512，建议离线正负样本「概率」
-    # 偏好对齐阶段lr <=「1e-8」长度3000，否则很容易遗忘训坏
-    parser.add_argument("--learning_rate", type=float, default=1e-8)                                    # 学习率
-    parser.add_argument('--max_seq_len', default=3000, type=int)                                        # 最大序列长度
-    parser.add_argument('--dim', default=512, type=int)                                                 # 模型维度
-    parser.add_argument("--use_wandb", action="store_true")                                             # 是否使用wandb
-    parser.add_argument("--accumulation_steps", type=int, default=1)                                    # 梯度累积步数
-    parser.add_argument("--grad_clip", type=float, default=1.0)                                         # 梯度裁剪
+    parser = argparse.ArgumentParser("MicroLM Knowledge Distillation")
+    parser.add_argument('--epochs', type=int, default=2, help='Number of epochs to train')                          # 训练的轮数
+    parser.add_argument('--num_workers', type=int, default=1, help='Number of workers for data loader')             # 数据加载器的工作线程数
+    parser.add_argument('--batch_size', type=int, default=32, help='Batch size')                                    # batch size，如果过大，可能会导致内存不足
+    parser.add_argument('--learning_rate', type=float, default=5e-5, help='Learning rate')                          # 学习率，MiniMind设置的是5e-4
+    parser.add_argument('--dim', type=int, default=512, help='Embedding dimension')                                 # 嵌入维度
+    parser.add_argument('--n_layers', type=int, default=8, help='Number of layers')                                 # 层数
+    parser.add_argument("--accumulation_steps", type=int, default=1)                                                # 梯度累积步数
+    parser.add_argument("--grad_clip", type=float, default=1.0)                                                     # 梯度裁剪
+    parser.add_argument('--max_seq_len', type=int, default=1024, help='Max sequence length')                        # 最大序列长度
+    parser.add_argument('--data_path', type=str, default='./model/dataset/KD_1024.jsonl', help='Data path')         # 数据集的路径
+    parser.add_argument("--wandb_project", type=str, default="MicroLM-Implementation-KD")                           # wandb的项目名
 
-    parser.add_argument("--wandb_project", type=str, default="MicroLM-RLHF")                            # wandb项目名
-    parser.add_argument("--dtype", type=str, default="bfloat16")                                        # 数据类型
-    parser.add_argument("--ddp", action="store_true")                                                   # 是否分布式训练
-    parser.add_argument("--device", type=str, default="cuda:0", help='Device to train on') # 设备
-    parser.add_argument('--n_layers', default=8, type=int)                                              # 模型层数
-    parser.add_argument('--use_moe', default=False, type=bool)                                          # 是否使用Mixture of Experts
-    parser.add_argument("--data_path", type=str, default="./model/dataset/myRLHF.jsonl")                # 数据集路径
-    parser.add_argument("--output_dir", type=str, default="./model_weight", help="Output directory")    # 输出目录
-    parser.add_argument("--log_interval", type=int, default=100)                                        # 日志间隔
-    parser.add_argument("--save_interval", type=int, default=100)                                       # 保存模型的间隔
+    parser.add_argument('--use_moe', action='store_true', help='Whether to use Mixture of Experts')                 # 是否使用Mixture of Experts
+    parser.add_argument('--device', type=str, default='cuda:0', help='Device to train on')                          # 训练的设备
+    parser.add_argument('--distributed', action='store_true', help='Whether to use distributed training')           # 是否使用分布式训练
+    parser.add_argument("--use_wandb", action="store_true")                                                         # 是否使用wandb
+    parser.add_argument('--dtype', type=str, default='bfloat16', help='Data type')                                  # 数据类型
+    parser.add_argument('--tokenizer_path', type=str, default='./model/minimind_tokenizer', help='Tokenizer to use')# 使用的分词器
+    parser.add_argument('--output_dir', type=str, default='./model_weight', help='Output directory')                # 保存模型的路径
+    parser.add_argument('--log_dir', type=str, default='./model/logs', help='Log directory')                        # 日志路径
+    parser.add_argument('--log_interval', type=int, default=100, help='Log interval')                               # 日志间隔
+    parser.add_argument('--save_interval', type=int, default=100, help='Save interval')                             # 日志保存间隔
 
     args = parser.parse_args()
 
@@ -265,7 +204,7 @@ if __name__ == "__main__":
 
     # ============================ wandb ============================
     # 配置wandb的运行名
-    args.wandb_run_name = f"MicroLM-Full-DPO-Epoch-{args.epochs}-BatchSize-{args.batch_size}-LearningRate-{args.learning_rate}"
+    args.wandb_run_name = f"MicroLM-KD-Epoch-{args.epochs}-BatchSize-{args.batch_size}-LearningRate-{args.learning_rate}"
 
     # 是否使用wandb
     if args.use_wandb and (not ddp or ddp_local_rank == 0):
@@ -276,10 +215,10 @@ if __name__ == "__main__":
 
     # ============================ 初始化 ============================
     # 初始化模型
-    model, ref_model, tokenizer = init_model(lm_config, args)
+    model, tokenizer = init_model(lm_config, args)
 
     # 加载数据集
-    train_dataset = DPODataset(args.data_path, tokenizer, args.max_seq_len)
+    train_dataset = SFTDataset(args.data_path, tokenizer, args.max_seq_len)
 
     # 如果是分布式训练，使用DistributedSampler
     train_sampler = DistributedSampler(train_dataset) if ddp else None
