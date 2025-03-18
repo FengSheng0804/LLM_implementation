@@ -45,8 +45,8 @@ def init_model(lm_config, args):
     moe_path = '_moe' if lm_config.use_moe else ''
 
     # 加载预训练模型
-    show_log(f'加载预训练模型：{args.output_dir}/pretrain_{lm_config.dim}{moe_path}.pth')
-    checkpoint = f'{args.output_dir}/pretrain_{lm_config.dim}{moe_path}.pth'
+    show_log(f'加载预训练模型：{args.output_dir}/full_sft_{lm_config.dim}{moe_path}.pth')
+    checkpoint = f'{args.output_dir}/full_sft_{lm_config.dim}{moe_path}.pth'
     
     # 加载预训练模型的参数
     state_dict = torch.load(checkpoint, map_location=args.device)
@@ -133,7 +133,7 @@ def train_epoch(epoch, wandb, iter_per_epoch):
         if (step + 1) % args.save_interval == 0 and (not ddp or distributed.get_rank() == 0):
             model.eval()
             moe_path = '_moe' if lm_config.use_moe else ''
-            checkpoint = f'{args.output_dir}/full_sft_{lm_config.dim}{moe_path}.pth'
+            checkpoint = f'{args.output_dir}/full_kd_{lm_config.dim}{moe_path}.pth'
 
             # 如果是分布式训练，则保存module的state_dict，否则保存model的state_dict
             if isinstance(model, DistributedDataParallel):
@@ -149,7 +149,7 @@ if __name__ == '__main__':
     # 设置随机种子
     torch.manual_seed(2004)
 
-    parser = argparse.ArgumentParser("MicroLM Full Supervised Fine-tuning")
+    parser = argparse.ArgumentParser("MicroLM Full Knowledge Distillation")
     parser.add_argument('--epochs', type=int, default=2, help='Number of epochs to train')                          # 训练的轮数
     parser.add_argument('--num_workers', type=int, default=1, help='Number of workers for data loader')             # 数据加载器的工作线程数
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')                                    # batch size，如果过大，可能会导致内存不足
@@ -158,9 +158,9 @@ if __name__ == '__main__':
     parser.add_argument('--n_layers', type=int, default=8, help='Number of layers')                                 # 层数
     parser.add_argument("--accumulation_steps", type=int, default=1)                                                # 梯度累积步数
     parser.add_argument("--grad_clip", type=float, default=1.0)                                                     # 梯度裁剪
-    parser.add_argument('--max_seq_len', type=int, default=512, help='Max sequence length')                         # 最大序列长度
-    parser.add_argument('--data_path', type=str, default='./model/dataset/sft_mini_512.jsonl', help='Data path')    # 数据集的路径
-    parser.add_argument("--wandb_project", type=str, default="MicroLM-Implementation-sft")                          # wandb的项目名
+    parser.add_argument('--max_seq_len', type=int, default=1024, help='Max sequence length')                        # 最大序列长度
+    parser.add_argument('--data_path', type=str, default='./model/dataset/kd_1024.jsonl', help='Data path')         # 数据集的路径
+    parser.add_argument("--wandb_project", type=str, default="MicroLM-Implementation-kd")                          # wandb的项目名
 
     parser.add_argument('--use_moe', action='store_true', help='Whether to use Mixture of Experts')                 # 是否使用Mixture of Experts
     parser.add_argument('--device', type=str, default='cuda:0', help='Device to train on')                          # 训练的设备
@@ -204,8 +204,8 @@ if __name__ == '__main__':
 
     # ============================ wandb ============================
     # 配置wandb的运行名
-    args.wandb_run_name = f"MicroLM-Full-SFT-Epoch-{args.epochs}-BatchSize-{args.batch_size}-LearningRate-{args.learning_rate}"
-    
+    args.wandb_run_name = f"MicroLM-Full-KD-Epoch-{args.epochs}-BatchSize-{args.batch_size}-LearningRate-{args.learning_rate}"
+
     # 是否使用wandb
     if args.use_wandb and (not ddp or ddp_local_rank == 0):
         import wandb
