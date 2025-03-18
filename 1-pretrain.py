@@ -1,23 +1,24 @@
 import os
-import math
 import time
-import argparse
-import warnings
+import math
 import torch
+import warnings
+import argparse
 import torch.nn as nn
 
-from model.PretrainDataset import PretrainDataset
-from model.MicroLMConfig import MicroLMConfig
 from model.MicroLM import MicroLM
+from model.MicroLMConfig import MicroLMConfig
+from model.PretrainDataset import PretrainDataset
 
 from torch.optim import AdamW
 from torch import distributed
 from torch.cuda.amp import GradScaler
-from torch.utils.data import DistributedSampler, DataLoader
-from torch.nn.parallel import DistributedDataParallel
 from torch.nn.utils import clip_grad_norm_
-from transformers import AutoTokenizer
+from torch.nn.parallel import DistributedDataParallel
+from torch.utils.data import DataLoader, DistributedSampler
 from contextlib import nullcontext
+from transformers import AutoTokenizer
+
 
 # 忽略警告
 warnings.filterwarnings('ignore')

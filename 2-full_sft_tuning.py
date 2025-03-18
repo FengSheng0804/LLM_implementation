@@ -1,9 +1,9 @@
 import os
-import math
 import time
-import argparse
-import warnings
+import math
 import torch
+import warnings
+import argparse
 import torch.nn as nn
 
 from model.MicroLM import MicroLM
@@ -13,11 +13,11 @@ from model.MicroLMConfig import MicroLMConfig
 from torch.optim import AdamW
 from torch import distributed
 from torch.cuda.amp import GradScaler
-from torch.utils.data import DistributedSampler, DataLoader
-from torch.nn.parallel import DistributedDataParallel
 from torch.nn.utils import clip_grad_norm_
-from transformers import AutoTokenizer
+from torch.nn.parallel import DistributedDataParallel
+from torch.utils.data import DistributedSampler, DataLoader
 from contextlib import nullcontext
+from transformers import AutoTokenizer
 
 # 忽略警告
 warnings.filterwarnings('ignore')
@@ -109,6 +109,7 @@ def train_epoch(epoch, wandb, iter_per_epoch):
             scaler.update()                                     # 更新缩放器状态
             optimizer.zero_grad(set_to_none=True)               # 梯度清零
 
+        # 打印日志
         if step % args.log_interval == 0:
             spend_time = time.time() - start_time
             show_log(
@@ -134,7 +135,7 @@ def train_epoch(epoch, wandb, iter_per_epoch):
             checkpoint = f'{args.output_dir}/full_sft_{lm_config.dim}{moe_path}.pth'
 
             # 如果是分布式训练，则保存module的state_dict，否则保存model的state_dict
-            if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+            if isinstance(model, DistributedDataParallel):
                 state_dict = model.module.state_dict()
             else:
                 state_dict = model.state_dict()
@@ -148,10 +149,12 @@ if __name__ == '__main__':
     torch.manual_seed(2004)
 
     parser = argparse.ArgumentParser("MicroLM Full Supervised Fine-tuning")
-    parser.add_argument('--epochs', type=int, default=1, help='Number of epochs to train')                          # 训练的轮数
+    parser.add_argument('--epochs', type=int, default=2, help='Number of epochs to train')                          # 训练的轮数
     parser.add_argument('--num_workers', type=int, default=1, help='Number of workers for data loader')             # 数据加载器的工作线程数
-    parser.add_argument('--batch_size', type=int, default=16, help='Batch size')                                    # batch size，如果过大，可能会导致内存不足
-    parser.add_argument('--max_seq_len', type=int, default=512, help='Max sequence length')                         # 最大序列长度
+    parser.add_argument('--batch_size', type=int, default=32, help='Batch size')                                    # batch size，如果过大，可能会导致内存不足
+    # 如果使用sft_mini_512.jsonl数据集，max_seq_len设置为512
+    # 如果使用sft_1024.jsonl数据集，max_seq_len设置为1024
+    parser.add_argument('--max_seq_len', type=int, default=1024, help='Max sequence length')                        # 最大序列长度
     parser.add_argument('--learning_rate', type=float, default=5e-5, help='Learning rate')                          # 学习率，MiniMind设置的是5e-4
     parser.add_argument('--dim', type=int, default=512, help='Embedding dimension')                                 # 嵌入维度
     parser.add_argument('--n_layers', type=int, default=8, help='Number of layers')                                 # 层数
@@ -164,7 +167,7 @@ if __name__ == '__main__':
     parser.add_argument("--use_wandb", action="store_true")                                                         # 是否使用wandb
     parser.add_argument("--wandb_project", type=str, default="MicroLM-Implementation-sft")                          # wandb的项目名
     parser.add_argument('--dtype', type=str, default='bfloat16', help='Data type')                                  # 数据类型
-    parser.add_argument('--data_path', type=str, default='./model/dataset/sft_mini_512.jsonl', help='Data path')    # 数据集的路径
+    parser.add_argument('--data_path', type=str, default='./model/dataset/sft_1024.jsonl', help='Data path')        # 数据集的路径
     parser.add_argument('--tokenizer_path', type=str, default='./model/minimind_tokenizer', help='Tokenizer to use')# 使用的分词器
     parser.add_argument('--output_dir', type=str, default='./model_weight', help='Output directory')                # 保存模型的路径
     parser.add_argument('--log_dir', type=str, default='./model/logs', help='Log directory')                        # 日志路径
@@ -223,13 +226,13 @@ if __name__ == '__main__':
 
     # 初始化数据加载器
     train_loader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        pin_memory=True,
-        drop_last=False,
-        shuffle=False,
-        num_workers=args.num_workers,
-        sampler=train_sampler
+        train_dataset,                          # 数据集
+        batch_size=args.batch_size,             # batch size
+        pin_memory=True,                        # 是否使用锁页内存
+        drop_last=False,                        # 是否丢弃最后一个batch
+        shuffle=False,                          # 是否打乱数据
+        num_workers=args.num_workers,           # 数据加载器的工作
+        sampler=train_sampler                   # 数据采样器
     )
 
     # 缩放因子，如果数据类型是float16或bfloat16，则使用GradScaler，用于进行自动混合精度（AMP）的梯度缩放
