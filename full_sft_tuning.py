@@ -52,7 +52,7 @@ def init_model(lm_config, args):
     model.load_state_dict(state_dict, strict=False)
 
     # 打印模型参数量
-    show_log(f'LLM总参数量：{sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.3f} 百万')
+    show_log(f'MicroLM总参数量：{sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.3f} 百万')
 
     # 将模型放到设备上，放在最后更合理
     model = model.to(args.device)
