@@ -26,7 +26,7 @@ warnings.filterwarnings('ignore')
 def show_log(log):
     # 如果不是分布式训练，直接输出日志
     # 如果是分布式训练，只有rank=0的进程才会输出日志
-    if not ddp or ddp.rank == 0:
+    if not ddp or distributed.get_rank() == 0:
         print(log)
 
 # 计算学习率

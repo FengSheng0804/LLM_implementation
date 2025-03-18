@@ -10,8 +10,8 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from model.MicroLM import MicroLM
 from model.MicroLMConfig import MicroLMConfig
 
+# 忽略警告
 warnings.filterwarnings('ignore')
-
 
 def init_model(args):
     # 加载tokenizer
@@ -22,7 +22,7 @@ def init_model(args):
         moe_path = '_moe' if args.use_moe else ''
 
         # 设置模型选择
-        modes = {0: 'pretrain', 1: 'full_sft', 2: 'rlhf', 3: 'reason'}
+        modes = {0: 'pretrain', 1: 'full_sft', 2: 'full_kd',3: 'rlhf', 4: 'reason'}
         checkpoint = f'./{args.model_dir}/{modes[args.model_mode]}_{args.dim}{moe_path}.pth'
 
         model = MicroLM(MicroLMConfig(

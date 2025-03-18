@@ -33,6 +33,25 @@
 }
 ```
 
+### 知识蒸馏数据集
+
+将教师模型（Teacher，如GPT-4）的知识（如输出概率分布、隐藏层特征）迁移到学生模型（Student，如TinyBERT），显著降低模型参数量和计算资源需求，同时保持性能。学生模型通过模仿教师模型的输出逻辑（如文本生成风格、逻辑推理能力），减少推理时的计算量（如从GPU到CPU部署）。
+
+对于知识蒸馏数据集，我们采用MiniMind官方整理的[sft_1024数据集](https://www.modelscope.cn/datasets/gongjy/minimind_dataset/file/view/master?id=68909&status=2&fileName=sft_1024.jsonl)，MiniMind官方将这部分数据进一步清洗，把总长度`<1024`的部分导出为`sft_1024.jsonl`(~5.5GB)，用大模型对话数据直接进行sft就属于“黑盒蒸馏”的范畴。
+
+数据集的格式如下：
+
+```json
+{
+    "conversations": [
+        {"role": "user", "content": "你好"},
+        {"role": "assistant", "content": "你好！"},
+        {"role": "user", "content": "再见"},
+        {"role": "assistant", "content": "再见！"}
+    ]
+}
+```
+
 ### 人类反馈强化学习数据集
 
 对于人类反馈强化学习数据集，我们采用整合自[MagpieLM]([MagpieLM-DPO-Data-v0.1 · 数据集](https://www.modelscope.cn/datasets/Magpie-Align/MagpieLM-DPO-Data-v0.1/files))官方的数据集，由于该数据集是parquet格式的，为了符合MiniMind的数据集，我们需要将数据集进行处理，得到jsonl格式的数据集。数据集的格式如下：
@@ -53,25 +72,6 @@
     {"content": "Q", "role": "user"}, 
     {"content": "bad answer", "role": "assistant"}
   ]
-}
-```
-
-### 知识蒸馏数据集
-
-将教师模型（Teacher，如GPT-4）的知识（如输出概率分布、隐藏层特征）迁移到学生模型（Student，如TinyBERT），显著降低模型参数量和计算资源需求，同时保持性能。学生模型通过模仿教师模型的输出逻辑（如文本生成风格、逻辑推理能力），减少推理时的计算量（如从GPU到CPU部署）。
-
-对于知识蒸馏数据集，我们采用MiniMind官方整理的[sft_1024数据集](https://www.modelscope.cn/datasets/gongjy/minimind_dataset/file/view/master?id=68909&status=2&fileName=sft_1024.jsonl)，MiniMind官方将这部分数据进一步清洗，把总长度`<1024`的部分导出为`sft_1024.jsonl`(~5.5GB)，用大模型对话数据直接进行sft就属于“黑盒蒸馏”的范畴。
-
-数据集的格式如下：
-
-```json
-{
-    "conversations": [
-        {"role": "user", "content": "你好"},
-        {"role": "assistant", "content": "你好！"},
-        {"role": "user", "content": "再见"},
-        {"role": "assistant", "content": "再见！"}
-    ]
 }
 ```
 
@@ -131,7 +131,9 @@ LoRA 是一种**参数高效微调（Parameter-Efficient Fine-Tuning, PEFT）**�
 - model/minimind_tokenizer/vocab.json
   词表文件，就是tokenizer.json中，model.vocab下的内容。
 
-## 第三步：预训练
+## 第三步：开始训练
+
+### 预训练
 
 我在AutoDL平台租用了一台拥有RTX 4090 * 1服务器，在执行的时候我们选择的参数是`epoch=2`，`batch_size=32`，`max_seq_len=512`，`learning_rate=5e-4`，`dim=512`，在运行了大概2个小时后，训练完成，训练时的损失曲线如下图所示：
 
@@ -143,7 +145,7 @@ LoRA 是一种**参数高效微调（Parameter-Efficient Fine-Tuning, PEFT）**�
 
 ![image-20250318105115208](.\images\image-20250318105115208.png)
 
-## 第四步：有监督微调-sft_mini_512
+### 有监督微调-sft_mini_512
 
 在执行完预训练后，我们使用sft_mini_512.jsonl数据集进行训练，在执行的时候我们选择的参数是`epoch=2`，`batch_size=32`，`max_seq_len=512`，`learning_rate=5e-5`，`dim=512`，在运行了大概2个小时后，训练完成，训练时的损失曲线如下图所示：
 
@@ -155,15 +157,19 @@ LoRA 是一种**参数高效微调（Parameter-Efficient Fine-Tuning, PEFT）**�
 
 ![image-20250318105640404](.\images\image-20250318105640404.png)
 
-## 第五步：有监督微调-sft_1024
+### 知识蒸馏
 
-在执行完有监督训练-sft_mini_512后，我们使用sft_mini_512.jsonl数据集继续进行进行有监督微调，在执行的时候我们选择的参数是`epoch=2`，`batch_size=64`，`max_seq_len=1024`，`learning_rate=5e-5`，`dim=512`，在运行了大概10个小时后，训练完成，训练时的损失曲线如下图所示：
+在执行完有监督训练-sft_mini_512后，我们使用sft_mini_512.jsonl数据集继续进行知识蒸馏，在执行的时候我们选择的参数是`epoch=2`，`batch_size=64`，`max_seq_len=1024`，`learning_rate=5e-5`，`dim=512`，由于数据集比较大，大约是5G左右，所以我们选择了单机双卡服务器，通过命令`torchrun --nproc_per_node 2 3-knowledge_distillation.py --use_wandb`在运行了大概6个小时后，训练完成，训练时的损失曲线如下图所示：
 
 
 
-## 第六步：人类反馈强化学习
+### 人类反馈强化学习
 
-在执行完有监督训练-sft_1024后，我们使用自行收集得到的myRLHF.jsonl数据集进行人类反馈强化学习（RLHF），此处我们使用的是DPO（Direct Preference Optimization），与PPO(Proximal Policy Optimization)这种需要奖励模型、价值模型的RL算法不同； DPO通过推导PPO奖励模型的显式解，把在线奖励模型换成离线数据，Ref模型输出可以提前保存。
+在执行完知识蒸馏后，我们使用自行收集得到的myRLHF.jsonl数据集进行人类反馈强化学习（RLHF），此处我们使用的是DPO（Direct Preference Optimization），与PPO(Proximal Policy Optimization)这种需要奖励模型、价值模型的RL算法不同； DPO通过推导PPO奖励模型的显式解，把在线奖励模型换成离线数据，Ref模型输出可以提前保存。
+
+在执行时我们选择的参数是`epoch=2`，`batch_size=8`，`max_seq_len=3000`，`learning_rate=1e-8`，`dim=512`，
+
+### 参数高效微调
 
 
 
