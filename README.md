@@ -159,7 +159,19 @@ LoRA 是一种**参数高效微调（Parameter-Efficient Fine-Tuning, PEFT）**�
 
 ### 知识蒸馏
 
-在执行完有监督训练-sft_mini_512后，我们使用sft_mini_512.jsonl数据集继续进行知识蒸馏，在执行的时候我们选择的参数是`epoch=2`，`batch_size=64`，`max_seq_len=1024`，`learning_rate=5e-5`，`dim=512`，由于数据集比较大，大约是5G左右，所以我们选择了单机双卡服务器，通过命令`torchrun --nproc_per_node 2 3-knowledge_distillation.py --use_wandb`在运行了大概6个小时后，训练完成，训练时的损失曲线如下图所示：
+在执行完有监督训练-sft_mini_512后，我们使用sft_mini_512.jsonl数据集继续进行知识蒸馏，在执行的时候我们选择的参数是`epoch=2`，`batch_size=64`，`max_seq_len=1024`，`learning_rate=5e-5`，`dim=512`，由于数据集比较大，大约是5G左右，所以我们选择了单机双卡服务器，通过命令`torchrun --nproc_per_node 2 3-KD.py --use_wandb`在运行了大概6个小时后，训练完成，训练时的损失曲线如下图所示：
+
+![KD_loss_curve](.\images\KD_loss_curve.png)
+
+最终的测试结果如下：
+
+可以看到经过知识蒸馏后的模型回答问题更加精确，并且可以分条回答，具有较好的结果。
+
+![image-20250319083554257](.\images\image-20250319083554257.png)
+
+
+
+
 
 
 
@@ -167,15 +179,23 @@ LoRA 是一种**参数高效微调（Parameter-Efficient Fine-Tuning, PEFT）**�
 
 在执行完知识蒸馏后，我们使用自行收集得到的myRLHF.jsonl数据集进行人类反馈强化学习（RLHF），此处我们使用的是DPO（Direct Preference Optimization），与PPO(Proximal Policy Optimization)这种需要奖励模型、价值模型的RL算法不同； DPO通过推导PPO奖励模型的显式解，把在线奖励模型换成离线数据，Ref模型输出可以提前保存。
 
-在执行时我们选择的参数是`epoch=2`，`batch_size=8`，`max_seq_len=3000`，`learning_rate=1e-8`，`dim=512`，
+在执行时我们选择的参数是`epoch=2`，`batch_size=8`，`max_seq_len=3000`，`learning_rate=1e-8`，`dim=512`，在训练时，我们选择了单机4卡服务器，通过命令`torchrun --nproc_per_node 4 4-RLHF --use_wandb`在运行了大概1个小时后，训练完成，训练时的损失曲线如下图所示：
+
+![RLHF_loss_curve](.\images\RLHF_loss_curve.png)
+
+最终的测试结果如下：
+
+![image-20250319083355281](.\images\image-20250319083355281.png)
 
 ### 参数高效微调
 
+在执行完人类反馈强化学习后，我们使用自行收集得到的LoRA_medical数据集进行参数高效微调（LoRA），我们使用到的参数是
 
 
 
+### 推理模型训练
 
-
+在执行完参数高效微调后，我们使用MiniMind官方提供的r1_mix_1024.jsonl数据集进行训练，
 
 
 
