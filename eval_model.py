@@ -1,14 +1,14 @@
-# 测评模型性能，LoRA模型的权重文件在out/LoRA目录下
-
 import argparse
 import random
-import time
 import numpy as np
 import torch
 import warnings
-from transformers import AutoTokenizer, AutoModelForCausalLM
+
 from model.MicroLM import MicroLM
 from model.MicroLMConfig import MicroLMConfig
+from model.LoRAModel import apply_LoRA, load_LoRA
+
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
 # 忽略警告
 warnings.filterwarnings('ignore')
@@ -39,7 +39,7 @@ def init_model(args):
         # 如果参数LoRA_name不为None，则加载LoRA模型
         if args.LoRA_name != 'None':
             apply_LoRA(model)
-            load_LoRA(model, f'./{args.model_dir}/LoRA/{args.LoRA_name}_{args.dim}.pth')
+            load_LoRA(model, f'./{args.model_dir}/{args.LoRA_name}_{args.dim}.pth')
     else:
         transformers_model_path = './Transformer_model'
         tokenizer = AutoTokenizer.from_pretrained(transformers_model_path)
@@ -83,6 +83,7 @@ def get_prompt_datas(args):
                     "你是ChatGPT吧。",
                     "你叫什么名字？",
                     "你和openai是什么关系？"
+                    "你的名字是什么？"
                 ],
                 'LoRA_medical': [
                     '我最近经常感到头晕，可能是什么原因？',
