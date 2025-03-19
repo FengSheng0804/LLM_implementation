@@ -4,9 +4,8 @@ import math
 import torch
 import warnings
 import argparse
-import torch.nn.functional as F
+import torch.nn as nn
 
-from model.LoRAModel import *
 from model.MicroLM import MicroLM
 from model.SFTDataset import SFTDataset
 from model.MicroLMConfig import MicroLMConfig
@@ -15,10 +14,10 @@ from torch.optim import AdamW
 from torch import distributed
 from torch.cuda.amp import GradScaler
 from torch.nn.utils import clip_grad_norm_
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.nn.parallel import DistributedDataParallel
+from torch.utils.data import DistributedSampler, DataLoader
 from contextlib import nullcontext
 from transformers import AutoTokenizer
-
 # 忽略警告
 warnings.filterwarnings('ignore')
 
@@ -45,8 +44,8 @@ def init_model(lm_config, args):
     moe_path = '_moe' if lm_config.use_moe else ''
 
     # 加载RLHF模型
-    show_log(f'加载RLHF模型：{args.output_dir}/RLHF_{lm_config.dim}{moe_path}.pth')
-    checkpoint = f'{args.output_dir}/RLHF_{lm_config.dim}{moe_path}.pth'
+    show_log(f'加载LoRA模型：{args.output_dir}/{args.LoRA_name}_{lm_config.dim}{moe_path}.pth')
+    checkpoint = f'{args.output_dir}/{args.LoRA_name}_{lm_config.dim}{moe_path}.pth'
     
     # 加载RLHF模型的参数
     state_dict = torch.load(checkpoint, map_location=args.device)
@@ -72,9 +71,16 @@ def init_distributed_mode():
     DEVICE = f"cuda:{ddp_local_rank}"                           # 设置当前进程的设备
     torch.cuda.set_device(DEVICE)
 
-# 训练一个epoch，代码和SFT几乎一致
-def train_epoch(epoch, wandb, iter_per_epoch):
-    loss_function = nn.CrossEntropyLoss(reduction='none')            # 使用交叉熵损失函数，reduction='none'，不对每个样本的损失求平均，保留每个样本的损失
+# 训练一个epoch
+def train_epoch(epoch, wandb):
+    # 思考标签占位符
+    start_of_think_ids = tokenizer('<think>').input_ids
+    end_of_think_ids = tokenizer('</think>').input_ids
+    start_of_answer_ids = tokenizer('<answer>').input_ids
+    end_of_answer_ids = tokenizer('</answer>').input_ids
+
+    # 使用CrossEntropyLoss计算损失
+    loss_function = nn.CrossEntropyLoss(reduction='none')
     start_time = time.time()
 
     # 遍历数据加载器
@@ -96,11 +102,23 @@ def train_epoch(epoch, wandb, iter_per_epoch):
                 result.logits.view(-1, result.logits.size(-1)),
                 Y.view(-1)
             ).view(Y.size())                                    # 计算损失
-            loss = (loss * loss_mask).sum() / loss_mask.sum()   # 计算平均损失，loss_mask用于加权损失
-            loss += result.aux_loss                             # 因为使用了Mixture of Experts，所以还需要加上aux_loss
-            loss = loss / args.accumulation_steps               # 梯度累积
 
-        scaler.scale(loss).backward()                           # 反向传播
+            # 获取额外的损失
+            sp_ids = torch.isin(Y.view(-1),
+                                torch.tensor(start_of_think_ids + end_of_think_ids
+                                             + start_of_answer_ids + end_of_answer_ids
+                                             ).to(args.device))
+            # 在 sp_ids 对应的位置增加额外的惩罚
+            loss_mask = loss_mask.view(-1)                          # 将loss_mask展平
+            loss_mask_sum = loss_mask.sum()                         # 计算loss_mask的和
+            loss_mask[sp_ids] = 10                                  # 在sp_ids对应的位置增加额外的惩罚
+            loss_mask = loss_mask.view(Y.size())                    # 将loss_mask还原成原来的形状
+            loss = (loss * loss_mask).sum() / loss_mask_sum         # 计算损失
+            loss += result.aux_loss                                 # 加上额外的损失
+            loss = loss / args.accumulation_steps                   # 梯度累积
+
+        # 反向传播和梯度更新
+        scaler.scale(loss).backward()
 
         # 梯度累积与参数更新
         if (step + 1) % args.accumulation_steps == 0:           # 每accumulation_steps次迭代更新一次参数
@@ -132,38 +150,48 @@ def train_epoch(epoch, wandb, iter_per_epoch):
         # 每隔save_interval保存一次模型
         if (step + 1) % args.save_interval == 0 and (not ddp or distributed.get_rank() == 0):
             model.eval()
-            # 【区别1】只保存LoRA权重即可
-            save_LoRA(model, f'{args.output_dir}/{args.LoRA_name}_{lm_config.dim}.pth')
+            moe_path = '_moe' if lm_config.use_moe else ''
+            checkpoint = f'{args.output_dir}/reason_{lm_config.dim}{moe_path}.pth'
+
+            # 如果是分布式训练，则保存module的state_dict，否则保存model的state_dict
+            if isinstance(model, DistributedDataParallel):
+                state_dict = model.module.state_dict()
+            else:
+                state_dict = model.state_dict()
+
+            # 保存模型
+            torch.save(state_dict, checkpoint)
             model.train()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # 设置随机种子
     torch.manual_seed(2004)
 
-    parser = argparse.ArgumentParser("MicroLM SFT with LoRA")
-    parser.add_argument('--epochs', type=int, default=50, help='Number of epochs to train')                             # 训练的轮数
-    parser.add_argument('--num_workers', type=int, default=1, help='Number of workers for data loader')                 # 数据加载器的工作线程数
-    parser.add_argument('--batch_size', type=int, default=16, help='Batch size')                                        # batch size，如果过大，可能会导致内存不足
-    parser.add_argument('--learning_rate', type=float, default=5e-5, help='Learning rate')                              # 学习率，MiniMind设置的是5e-4
-    parser.add_argument('--dim', type=int, default=512, help='Embedding dimension')                                     # 嵌入维度
-    parser.add_argument('--n_layers', type=int, default=8, help='Number of layers')                                     # 层数
-    parser.add_argument("--accumulation_steps", type=int, default=1)                                                    # 梯度累积步数
-    parser.add_argument("--grad_clip", type=float, default=1.0)                                                         # 梯度裁剪
-    parser.add_argument('--max_seq_len', type=int, default=512, help='Max sequence length')                             # 最大序列长度
-    parser.add_argument('--data_path', type=str, default='./model/dataset/LoRA_medical.jsonl', help='Data path')        # 数据集的路径
+    parser = argparse.ArgumentParser(description="MicroLM Distill Reasoning")
+    parser.add_argument('--epochs', type=int, default=2, help='Number of epochs to train')                          # 训练的轮数
+    parser.add_argument('--num_workers', type=int, default=1, help='Number of workers for data loader')             # 数据加载器的工作线程数
+    parser.add_argument('--batch_size', type=int, default=32, help='Batch size')                                    # batch size，如果过大，可能会导致内存不足
+    parser.add_argument('--learning_rate', type=float, default=1e-6, help='Learning rate')                          # 学习率，MiniMind设置的是5e-4
+    parser.add_argument('--max_seq_len', type=int, default=1025, help='Max sequence length')                         # 最大序列长度
+    parser.add_argument('--dim', type=int, default=512, help='Embedding dimension')                                 # 嵌入维度
+    parser.add_argument('--n_layers', type=int, default=8, help='Number of layers')                                 # 层数
+    parser.add_argument("--accumulation_steps", type=int, default=1)                                                # 梯度累积步数
+    parser.add_argument("--grad_clip", type=float, default=1.0)                                                     # 梯度裁剪
+    parser.add_argument('--data_path', type=str, default='./model/dataset/SFT_mini_512.jsonl', help='Data path')    # 数据集的路径
+    parser.add_argument("--data_path", type=str, default="./dataset/r1_mix_1024.jsonl", help="Data path")        # 数据集的路径
     parser.add_argument("--LoRA_name", type=str, default="LoRA_medical", help="根据任务保存成LoRA_(英文/医学/心理...)")   # 保存的LoRA模型的名字
-    parser.add_argument("--wandb_project", type=str, default="MicroLM-Implementation-LoRA-SFT")                         # wandb的项目名
+    parser.add_argument("--wandb_project", type=str, default="MicroLM-Implementation-Reason")                          # wandb的项目名
 
-    parser.add_argument('--use_moe', action='store_true', help='Whether to use Mixture of Experts')                     # 是否使用Mixture of Experts
-    parser.add_argument('--device', type=str, default='cuda:0', help='Device to train on')                              # 训练的设备
-    parser.add_argument('--distributed', action='store_true', help='Whether to use distributed training')               # 是否使用分布式训练
-    parser.add_argument("--use_wandb", action="store_true")                                                             # 是否使用wandb
-    parser.add_argument('--dtype', type=str, default='bfloat16', help='Data type')                                      # 数据类型
-    parser.add_argument('--tokenizer_path', type=str, default='./model/minimind_tokenizer', help='Tokenizer to use')    # 使用的分词器
-    parser.add_argument('--output_dir', type=str, default='./model_weight', help='Output directory')                    # 保存模型的路径
-    parser.add_argument('--log_dir', type=str, default='./model/logs', help='Log directory')                            # 日志路径
-    parser.add_argument('--log_interval', type=int, default=100, help='Log interval')                                   # 日志间隔
-    parser.add_argument('--save_interval', type=int, default=1, help='Save interval')                                   # 日志保存间隔
+    parser.add_argument('--use_moe', action='store_true', help='Whether to use Mixture of Experts')                 # 是否使用Mixture of Experts
+    parser.add_argument('--device', type=str, default='cuda:0', help='Device to train on')                          # 训练的设备
+    parser.add_argument('--distributed', action='store_true', help='Whether to use distributed training')           # 是否使用分布式训练
+    parser.add_argument("--use_wandb", action="store_true")                                                         # 是否使用wandb
+    parser.add_argument('--dtype', type=str, default='bfloat16', help='Data type')                                  # 数据类型
+    parser.add_argument('--tokenizer_path', type=str, default='./model/minimind_tokenizer', help='Tokenizer to use')# 使用的分词器
+    parser.add_argument('--output_dir', type=str, default='./model_weight', help='Output directory')                # 保存模型的路径
+    parser.add_argument('--log_dir', type=str, default='./model/logs', help='Log directory')                        # 日志路径
+    parser.add_argument('--log_interval', type=int, default=1, help='Log interval')                               # 日志间隔
+    parser.add_argument('--save_interval', type=int, default=50, help='Save interval')                             # 日志保存间隔
 
     args = parser.parse_args()
 
@@ -196,8 +224,8 @@ if __name__ == '__main__':
 
     # ============================ wandb ============================
     # 配置wandb的运行名
-    args.wandb_run_name = f"MicroLM-LoRA-SFT-Epoch-{args.epochs}-BatchSize-{args.batch_size}-LearningRate-{args.learning_rate}"
-    
+    args.wandb_run_name = f"MicroLM-Distill-Reasoning-Epoch-{args.epochs}-BatchSize-{args.batch_size}-LearningRate-{args.learning_rate}"
+
     # 是否使用wandb
     if args.use_wandb and (not ddp or ddp_local_rank == 0):
         import wandb
@@ -208,28 +236,6 @@ if __name__ == '__main__':
     # ============================ 初始化 ============================
     # 初始化模型
     model, tokenizer = init_model(lm_config, args)
-
-    # 应用LoRA
-    apply_LoRA(model)
-    
-    total_params = sum(p.numel() for p in model.parameters())                                       # 总参数数量
-    LoRA_params_count = sum(p.numel() for name, p in model.named_parameters() if 'LoRA' in name)    # LoRA 参数数量
-    
-    # 打印模型参数量
-    if not ddp or distributed.get_rank() == 0:
-        print(f"MicroLM 总参数量: {total_params}")
-        print(f"LoRA 参数量: {LoRA_params_count}")
-        print(f"LoRA 参数占比: {LoRA_params_count / total_params * 100:.2f}%")
-
-    # ============================ 模型优化 ============================
-    LoRA_params = []
-    for name, param in model.named_parameters():
-        if 'LoRA' in name:
-            LoRA_params.append(param)
-        else:
-            param.requires_grad = False
-
-    # 【区别2】只对 LoRA 参数进行优化
 
     # 加载数据集
     train_dataset = SFTDataset(args.data_path, tokenizer, args.max_seq_len)
@@ -251,8 +257,14 @@ if __name__ == '__main__':
     # 缩放因子，如果数据类型是float16或bfloat16，则使用GradScaler，用于进行自动混合精度（AMP）的梯度缩放
     scaler = GradScaler(enabled=(args.dtype in ['float16', 'bfloat16']))
 
-    # 优化器
-    optimizer = AdamW(LoRA_params, lr=args.learning_rate)
+    # 初始化优化器
+    optimizer = AdamW(model.parameters(), lr=args.learning_rate)
+
+    # 如果是分布式训练，使用DistributedDataParallel
+    if ddp:
+        # 忽略pos_cis参数
+        model._ddp_params_and_buffers_to_ignore = {"pos_cis"}
+        model = DistributedDataParallel(model, device_ids=[ddp_local_rank])
 
     iter_per_epoch = len(train_loader)                          # 每个epoch的迭代次数
     for epoch in range(args.epochs):

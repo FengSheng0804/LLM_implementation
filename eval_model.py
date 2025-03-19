@@ -1,4 +1,4 @@
-# 测评模型性能，lora模型的权重文件在out/lora目录下
+# 测评模型性能，LoRA模型的权重文件在out/LoRA目录下
 
 import argparse
 import random
@@ -22,7 +22,7 @@ def init_model(args):
         moe_path = '_moe' if args.use_moe else ''
 
         # 设置模型选择
-        modes = {0: 'pretrain', 1: 'full_sft', 2: 'full_kd',3: 'rlhf', 4: 'reason'}
+        modes = {0: 'pretrain', 1: 'SFT', 2: 'KD',3: 'RLHF', 4: 'reason'}
         checkpoint = f'./{args.model_dir}/{modes[args.model_mode]}_{args.dim}{moe_path}.pth'
 
         model = MicroLM(MicroLMConfig(
@@ -36,10 +36,10 @@ def init_model(args):
         state_dict = torch.load(checkpoint, map_location=args.device)
         model.load_state_dict({k: v for k, v in state_dict.items() if 'mask' not in k}, strict=True)
 
-        # 如果参数lora_name不为None，则加载lora模型
-        if args.lora_name != 'None':
-            apply_lora(model)
-            load_lora(model, f'./{args.model_dir}/lora/{args.lora_name}_{args.dim}.pth')
+        # 如果参数LoRA_name不为None，则加载LoRA模型
+        if args.LoRA_name != 'None':
+            apply_LoRA(model)
+            load_LoRA(model, f'./{args.model_dir}/LoRA/{args.LoRA_name}_{args.dim}.pth')
     else:
         transformers_model_path = './Transformer_model'
         tokenizer = AutoTokenizer.from_pretrained(transformers_model_path)
@@ -63,7 +63,7 @@ def get_prompt_datas(args):
             '杭州市的美食有'
         ]
     else:
-        if args.lora_name == 'None':
+        if args.LoRA_name == 'None':
             # 通用对话问题
             prompt_datas = [
                 '请介绍一下自己。',
@@ -78,13 +78,13 @@ def get_prompt_datas(args):
             ]
         else:
             # 特定领域问题
-            lora_prompt_datas = {
-                'lora_identity': [
+            LoRA_prompt_datas = {
+                'LoRA_identity': [
                     "你是ChatGPT吧。",
                     "你叫什么名字？",
                     "你和openai是什么关系？"
                 ],
-                'lora_medical': [
+                'LoRA_medical': [
                     '我最近经常感到头晕，可能是什么原因？',
                     '我咳嗽已经持续了两周，需要去医院检查吗？',
                     '服用抗生素时需要注意哪些事项？',
@@ -95,7 +95,7 @@ def get_prompt_datas(args):
                     '如果有人突然晕倒，应该如何急救？'
                 ],
             }
-            prompt_datas = lora_prompt_datas[args.lora_name]
+            prompt_datas = LoRA_prompt_datas[args.LoRA_name]
 
     return prompt_datas
 
@@ -115,23 +115,23 @@ def setup_seed(seed):
 def main():
     parser = argparse.ArgumentParser(description="Test MicroLM model")
     # 此处max_seq_len（最大允许输入长度）并不意味模型具有对应的长文本的性能，仅防止QA出现被截断的问题
-    parser.add_argument('--dim', default=512, type=int)                                                 # 模型维度
-    parser.add_argument('--n_layers', default=8, type=int)                                              # 模型层数
-    parser.add_argument('--max_seq_len', default=8192, type=int)                                        # 最大输入长度
-    parser.add_argument('--use_moe', default=False, type=bool)                                          # 是否使用Mixture of Experts
-    parser.add_argument('--lora_name', default='None', type=str)                                        # lora模型名称
-    parser.add_argument('--load', default=0, type=int, help="0: 原生torch权重, 1: transformers加载")     # 是否加载transformers模型
+    parser.add_argument('--dim', default=512, type=int)                                                         # 模型维度
+    parser.add_argument('--n_layers', default=8, type=int)                                                      # 模型层数
+    parser.add_argument('--max_seq_len', default=8192, type=int)                                                # 最大输入长度
+    parser.add_argument('--use_moe', default=False, type=bool)                                                  # 是否使用Mixture of Experts
+    parser.add_argument('--LoRA_name', default='None', type=str)                                                # LoRA模型名称
+    parser.add_argument('--load', default=0, type=int, help="0: 原生torch权重, 1: transformers加载")             # 是否加载transformers模型
     parser.add_argument('--model_mode', default=1, type=int,
-                        help="0: 预训练模型, 1: SFT-Chat模型, 2: RLHF-Chat模型, 3: Reason模型")           # 模型模式
+                        help="0: 预训练模型, 1: SFT-Chat模型, 2: KD-Chat模型, 3:RLHF-Chat模型, 4: Reason模型")    # 模型模式
     # 携带历史对话上下文条数
     # history_cnt需要设为偶数，即【用户问题, 模型回答】为1组；设置为0时，即当前query不携带历史上文
     # 模型未经过外推微调时，在更长的上下文的chat_template时难免出现性能的明显退化，因此需要注意此处设置
-    parser.add_argument('--history_cnt', default=0, type=int)                                           # 历史对话上下文条数
-    parser.add_argument('--temperature', default=0.85, type=float)                                      # 温度，控制生成文本的多样性
-    parser.add_argument('--top_p', default=0.85, type=float)                                            # top-p采样，控制生成文本的多样性
-    parser.add_argument('--stream', default=True, type=bool)                                            # 是否流式输出
-    parser.add_argument('--model_dir', default='./model_weight', type=str)                              # 模型权重目录
-    parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu', type=str)   # 设备
+    parser.add_argument('--history_cnt', default=0, type=int)                                                   # 历史对话上下文条数
+    parser.add_argument('--temperature', default=0.85, type=float)                                              # 温度，控制生成文本的多样性
+    parser.add_argument('--top_p', default=0.85, type=float)                                                    # top-p采样，控制生成文本的多样性
+    parser.add_argument('--stream', default=True, type=bool)                                                    # 是否流式输出
+    parser.add_argument('--model_dir', default='./model_weight', type=str)                                      # 模型权重目录
+    parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu', type=str)           # 设备
 
     args = parser.parse_args()
 
