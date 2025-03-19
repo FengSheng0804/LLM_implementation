@@ -46,7 +46,7 @@ def init_model(args):
         model = AutoModelForCausalLM.from_pretrained(transformers_model_path, trust_remote_code=True)
     
     # 输出模型参数量
-    print(f'MicroLM模型参数量: {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.2f}M(illion)')
+    print(f'MicroLM模型参数量: {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.2f}(Million)')
     return model.eval().to(args.device), tokenizer
 
 

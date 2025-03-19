@@ -169,12 +169,6 @@ LoRA 是一种**参数高效微调（Parameter-Efficient Fine-Tuning, PEFT）**�
 
 ![image-20250319083554257](.\images\image-20250319083554257.png)
 
-
-
-
-
-
-
 ### 人类反馈强化学习
 
 在执行完知识蒸馏后，我们使用自行收集得到的myRLHF.jsonl数据集进行人类反馈强化学习（RLHF），此处我们使用的是DPO（Direct Preference Optimization），与PPO(Proximal Policy Optimization)这种需要奖励模型、价值模型的RL算法不同； DPO通过推导PPO奖励模型的显式解，把在线奖励模型换成离线数据，Ref模型输出可以提前保存。
@@ -185,17 +179,31 @@ LoRA 是一种**参数高效微调（Parameter-Efficient Fine-Tuning, PEFT）**�
 
 最终的测试结果如下：
 
+可以看到通过RLHF后的效果已经非常出色了，能够正确理解问题并分条详细介绍。
+
 ![image-20250319083355281](.\images\image-20250319083355281.png)
-
-### 参数高效微调
-
-在执行完人类反馈强化学习后，我们使用自行收集得到的LoRA_medical数据集进行参数高效微调（LoRA），我们使用到的参数是
-
-
 
 ### 推理模型训练
 
-在执行完参数高效微调后，我们使用MiniMind官方提供的r1_mix_1024.jsonl数据集进行训练，
+在执行完参数高效微调后，我们使用MiniMind官方提供的r1_mix_1024.jsonl数据集进行训练，在训练时的损失曲线如下：
+
+![Reason_loss_curve](.\images\Reason_loss_curve.png)
+
+最终的测试结果如下：
+
+![image-20250319174422079](.\images\image-20250319174422079.png)
+
+### 参数高效微调
+
+在执行完人类反馈强化学习后，我们使用自行收集得到的LoRA_medical数据集进行参数高效微调（LoRA），我们使用到的参数是`epoch=2`0，`batch_size=32`，`max_seq_len=512`，`learning_rate=5e-5`，`dim=512`，在训练时得到的损失曲线如下：
+
+![LoRA_loss_curve](.\images\LoRA_loss_curve.png)
+
+最终的测试效果如下：
+
+![image-20250319204640418](F:\desktop\Python\Python自学\pythonProject\MachineLearning-torch\LLM_implementation\image-20250319204640418.png)
+
+
 
 
 

@@ -133,7 +133,7 @@ def train_epoch(epoch, wandb, iter_per_epoch):
         if (step + 1) % args.save_interval == 0 and (not ddp or distributed.get_rank() == 0):
             model.eval()
             # 【区别1】只保存LoRA权重即可
-            save_LoRA(model, f'{args.output_dir}/LoRA/{args.LoRA_name}_{lm_config.dim}.pth')
+            save_LoRA(model, f'{args.output_dir}/{args.LoRA_name}_{lm_config.dim}.pth')
             model.train()
 
 if __name__ == '__main__':
@@ -141,7 +141,7 @@ if __name__ == '__main__':
     torch.manual_seed(2004)
 
     parser = argparse.ArgumentParser("MicroLM SFT with LoRA")
-    parser.add_argument('--epochs', type=int, default=20, help='Number of epochs to train')                             # 训练的轮数
+    parser.add_argument('--epochs', type=int, default=50, help='Number of epochs to train')                             # 训练的轮数
     parser.add_argument('--num_workers', type=int, default=1, help='Number of workers for data loader')                 # 数据加载器的工作线程数
     parser.add_argument('--batch_size', type=int, default=16, help='Batch size')                                        # batch size，如果过大，可能会导致内存不足
     parser.add_argument('--learning_rate', type=float, default=5e-5, help='Learning rate')                              # 学习率，MiniMind设置的是5e-4
@@ -150,8 +150,8 @@ if __name__ == '__main__':
     parser.add_argument("--accumulation_steps", type=int, default=1)                                                    # 梯度累积步数
     parser.add_argument("--grad_clip", type=float, default=1.0)                                                         # 梯度裁剪
     parser.add_argument('--max_seq_len', type=int, default=512, help='Max sequence length')                             # 最大序列长度
-    parser.add_argument('--data_path', type=str, default='./model/dataset/LoRA_identity.jsonl', help='Data path')       # 数据集的路径
-    parser.add_argument("--LoRA_name", type=str, default="LoRA_identity", help="根据任务保存成LoRA_(英文/医学/心理...)")  # 保存的LoRA模型的名字
+    parser.add_argument('--data_path', type=str, default='./model/dataset/LoRA_medical.jsonl', help='Data path')       # 数据集的路径
+    parser.add_argument("--LoRA_name", type=str, default="LoRA_medical", help="根据任务保存成LoRA_(英文/医学/心理...)")  # 保存的LoRA模型的名字
     parser.add_argument("--wandb_project", type=str, default="MicroLM-Implementation-LoRA-SFT")                         # wandb的项目名
 
     parser.add_argument('--use_moe', action='store_true', help='Whether to use Mixture of Experts')                     # 是否使用Mixture of Experts
