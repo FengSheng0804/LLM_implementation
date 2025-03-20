@@ -201,9 +201,16 @@ LoRA 是一种**参数高效微调（Parameter-Efficient Fine-Tuning, PEFT）**�
 
 最终的测试效果如下：
 
-![image-20250319204640418](F:\desktop\Python\Python自学\pythonProject\MachineLearning-torch\LLM_implementation\image-20250319204640418.png)
+![image-20250319204640418](.\images\image-20250319204640418.png)
 
+## 第四步：服务器部署
 
+在经过前三步得到模型后，我们使用flask框架运行一个服务器，实现更方便的使用模型，如下图是我们在启动服务器后，通过输入栏输入内容，得到的模型的预测值。由于电脑性能的问题，我们只能同时启动两个模型进行预测，我们打开了KD_512模型和RLHF_512模型。
 
+如下图是使用KD_512模型进行预测的结果：
 
+![image-20250320185651995](.\images\image-20250320185651995.png)
 
+如下图是使用RLHF_512模型进行预测的结果：
+
+![image-20250320185320509](.\images\image-20250320185320509.png)

@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MicroLM</title>
+    <link rel="stylesheet" href="../static/css/style.css">
+    <script src="../static/js/main.js"></script>
+</head>
+
+<body>
+    <div class="container">
+        <!-- 左侧导航栏 -->
+        <div class="sidebar">
+            <div class="nav-header">
+                <div class="nav-title1">MicroLM</div>
+                <div class="nav-title2">模型选择</div>
+                <div class="nav-item" data-model="SFT_512">SFT_512</div>
+                <div class="nav-item" data-model="KD_512">KD_512</div>
+                <div class="nav-item" data-model="RLHF_512">RLHF_512</div>
+                <div class="nav-item" data-model="reason_512">reason_512</div>
+                <div class="nav-item" data-model="LoRA_medical_512">LoRA_medical_512</div>
+            </div>
+
+            <!-- 导航底部 -->
+            <div class="nav-footer" style="margin-top: auto;">
+                <div class="nav-item">新建对话</div>
+            </div>
+        </div>
+
+        <!-- 右侧主内容 -->
+        <div class="main-content">
+            <!-- 标题栏 -->
+            <div class="header">
+                <h2>KD_512</h2>
+            </div>
+
+            <!-- 聊天容器 -->
+            <div class="chat-container">
+                <div class="message assistant-message">
+                    <div class="avatar assistant-avatar"></div>
+                    <div class="message-content">您好，我是您的助手MicroLM，请先从左侧选择模型</div>
+                </div>
+            </div>
+
+            <!-- 在导航区域之前添加一个白色的渐变区域 -->
+            <div class="nav-gradient"></div>
+
+            <!-- 输入容器 -->
+            <div class="input-container">
+                <div class="input-wrapper">
+                    <input type="text" placeholder="有问题，尽管问，shift+enter换行" id="user-input">
+                    <button onclick="sendMessage()">▶</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>
