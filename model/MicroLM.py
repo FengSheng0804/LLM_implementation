@@ -10,10 +10,21 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 
 # 预计算位置编码
 def precompute_pos_cis(dim: int, end: int = int(32 * 1024), theta: float = 1e6):
+    # 公式1: 计算频率 - freqs_i = 1 / (θ^(2i/d))
+    # 其中 i ∈ [0, 1, 2, ..., d/2-1], d是维度
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-    t = torch.arange(end, device=freqs.device)  # type: ignore
-    freqs = torch.outer(t, freqs).float()  # type: ignore
-    pos_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
+    
+    # 公式2: 生成位置序列 - t ∈ [0, 1, 2, ..., end-1]
+    t = torch.arange(end, device=freqs.device)
+    
+    # 公式3: 外积计算 - m_i * θ_i，其中m是位置，θ_i是第i个频率
+    # freqs[m,i] = m * freqs_i
+    freqs = torch.outer(t, freqs).float()
+    
+    # 公式4: 生成复数形式的旋转矩阵 - e^(i*m*θ_i) = cos(m*θ_i) + i*sin(m*θ_i)
+    # 使用极坐标形式: magnitude=1, angle=freqs
+    pos_cis = torch.polar(torch.ones_like(freqs), freqs)
+    
     return pos_cis
 
 # RoPE，旋转位置编码
@@ -67,10 +78,14 @@ class RMSNorm(torch.nn.Module):
     def forward(self, x):
         return self.weight * (x.float() * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)).type_as(x)
 
-# 注意力层
+# 注意力层：使用的是分组查询注意力
 class Attention(nn.Module):
     def __init__(self, args: MicroLMConfig):
         super().__init__()
+        # n_kv_heads为key和value的头数
+        # n_heads为总的多头注意力头数
+        # n_local_heads为query的头数，local表示在本地计算的头数（通常会使用分布式训练，当分布式训练的时候二者就不相等了）
+        # n_local_kv_heads为key和value的头数，local表示在本地计算的头数（但是如果使用单机训练，则二者相等）
         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads      # 多头注意力头数，如果args.n_kv_heads为None，则使用args.n_heads
         assert args.n_heads % self.n_kv_heads == 0                                          # 多头注意力头数必须能被key和value的头数整除
         self.n_local_heads = args.n_heads                                                   # 总query的头数
@@ -99,7 +114,7 @@ class Attention(nn.Module):
         # 这里我们使用一个非常大的负数来填充掩码，这样在softmax之后，这些位置的概率就会接近于0
         mask = torch.full((1, 1, args.max_seq_len, args.max_seq_len), float("-inf"))
         mask = torch.triu(mask, diagonal=1)                                                 # 上三角掩码
-        
+
         # 注册掩码，存放在模型的buffer中，避免在模型的forward中重复创建
         self.register_buffer("mask", mask, persistent=False)
 
@@ -126,7 +141,9 @@ class Attention(nn.Module):
         k = self.wk(x)
         v = self.wv(x)
 
-        # 将多头拆分：[batch_size, seq_len, n_heads, head_dim]
+        # 将多头拆分：只拆分不复制数据
+        # 输入: [batch_size, seq_len, n_heads * head_dim]
+        # 输出：[batch_size, seq_len, n_heads, head_dim]
         q = q.view(batch_size, seq_len, self.n_local_heads, self.head_dim)
         k = k.view(batch_size, seq_len, self.n_local_kv_heads, self.head_dim)
         v = v.view(batch_size, seq_len, self.n_local_kv_heads, self.head_dim)
@@ -134,16 +151,17 @@ class Attention(nn.Module):
         # 应用旋转位置编码RoPE
         q, k = apply_rotary_emb(q, k, pos_cis)
 
-        # 如果使用缓存，则将过去的key和value拼接到当前的key和value上
+        # 如果使用kv缓存，则将过去的key和value拼接到当前的key和value上
+        # 仅需为​​新生成的Token​​计算Key和Value，并复用历史缓存，将复杂度降至 O(n)。
         if past_key_value is not None:
             k = torch.cat([past_key_value[0], k], dim=1)                                    # 拼接历史Key
             v = torch.cat([past_key_value[1], v], dim=1)                                    # 拼接历史Value
         past_key_value = (k, v) if use_cache else None
 
         # 调整维度为 (batch_size, n_heads, seq_len, head_dim)，使得多头可以并行计算
-        q = q.transpose(1, 2)
-        k = repeat_kv(k, self.n_rep).transpose(1, 2)                                        # 拓展key的维度
-        v = repeat_kv(v, self.n_rep).transpose(1, 2)                                        # 拓展value的维度
+        q = q.transpose(1, 2)                                                               # 将seq_len和n_heads维度交换
+        k = repeat_kv(k, self.n_rep).transpose(1, 2)                                        # 重复Key以匹配Query头数，并交换维度
+        v = repeat_kv(v, self.n_rep).transpose(1, 2)                                        # 重复Value以匹配Query头数，并交换维度
 
         # Flash Attention加速模式
         if self.flash and seq_len != 1:
@@ -151,22 +169,28 @@ class Attention(nn.Module):
                 q, k, v,
                 attn_mask=None,
                 dropout_p=self.dropout if self.training else 0.0,
-                is_causal=True                                                              # 自动应用因果掩码
+                is_causal=True                                                              # 自动应用因果掩码，也就是上三角掩码
             )
         else:
             # 手动计算注意力
             scores = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-            scores += self.mask[:, :, :seq_len, :seq_len]                                   # 应用因果掩码
+            # 应用因果掩码，也就是上三角掩码
+            scores += self.mask[:, :, :seq_len, :seq_len]
+            # 在最后一个维度将分数转换为概率分布，并保持与q的维度一致
             scores = F.softmax(scores.float(), dim=-1).type_as(q)
+            # 如果训练时使用Dropout，则应用Dropout
             scores = self.attn_dropout(scores)
+            # 计算注意力输出
             output = scores @ v
 
         # 输出处理
-        output = output.transpose(1, 2).reshape(batch_size, seq_len, -1)
-        output = self.resid_dropout(self.wo(output))                                        # 输出投影+Dropout
+        output = output.transpose(1, 2).reshape(batch_size, seq_len, -1)                    # 将n_heads维度和seq_len维度交换，并展平为(batch_size, seq_len, n_heads * head_dim)
+        # 先对输出进行线性投影，然后应用残差的Dropout
+        output = self.resid_dropout(self.wo(output))
         return output, past_key_value
 
-# FeedForward层
+# FeedForward层：前馈神经网络层，用于对每个token进行非线性变换
+# 使用门控机制，类似于标准的FFN，但使用了SiLU激活函数和门控信号
 class FeedForward(nn.Module):
     def __init__(self, config: MicroLMConfig):
         super().__init__()
@@ -183,15 +207,19 @@ class FeedForward(nn.Module):
         # 定义线性层
         self.w1 = nn.Linear(config.dim, config.hidden_dim, bias=False)                      # 将输入升维到隐藏空间（类似标准FFN的第一层）
         self.w2 = nn.Linear(config.hidden_dim, config.dim, bias=False)                      # 将门控结果降维回原始维度
-        self.w3 = nn.Linear(config.dim, config.hidden_dim, bias=False)                      # 生成门控信号（与w1并行但独立）
+        self.w3 = nn.Linear(config.dim, config.hidden_dim, bias=False)                      # 生成门控信号，也就是权重
         self.dropout = nn.Dropout(config.dropout)                                           # 输出正则化
 
     def forward(self, x):
         # 公式：FFN(x) = Dropout(W2(SiLU(W1(x)) ⊙ W3(x)))
-        gate = F.silu(self.w1(x))                                                           # SiLU激活函数
-        modulated = gate * self.w3(x)                                                       # 逐元素相乘（门控）
-        output = self.w2(modulated)                                                         # 降维投影
-        return self.dropout(output)                                                         # 正则化输出
+        # SiLU激活函数，经过SiLU(W1(x)后得到的gate是特征而不是权重
+        gate = F.silu(self.w1(x))
+        # 逐元素相乘，w3(x)是门控信号
+        modulated = gate * self.w3(x)
+        # 降维投影
+        output = self.w2(modulated)
+        # 正则化输出
+        return self.dropout(output)
 
 class MoEGate(nn.Module):
     def __init__(self, config: MicroLMConfig):
@@ -206,10 +234,13 @@ class MoEGate(nn.Module):
         self.norm_topk_prob = config.norm_topk_prob                                         # 是否对top_k权重归一化
         self.gating_dim = config.dim                                                        # 门控维度
         
-        # 可学习参数：专家选择权重矩阵
+        # 可学习参数：初始化专家选择权重矩阵的权重参数
+        # nn.Parameter将张量标记为模型的可学习参数，会被自动添加到优化器中
+        # torch.empty创建一个未初始化的张量，形状为(n_routed_experts, gating_dim)
         self.weight = nn.Parameter(
             torch.empty((self.n_routed_experts, self.gating_dim))
         )
+        # 重置参数
         self.reset_parameters()
 
     # 重置参数
@@ -219,70 +250,71 @@ class MoEGate(nn.Module):
         init.kaiming_uniform_(self.weight, a=math.sqrt(5)) 
 
     def forward(self, hidden_states):
-            # 输入形状: (batch_size, seq_len, hidden_dim)
-            batch_size, seq_len, h = hidden_states.shape
-            
-            # 将输入展平为 (batch_size*seq_len, hidden_dim)
-            hidden_states = hidden_states.view(-1, h)
-            
-            # 计算原始分数 logits: [batch_size*seq_len, n_experts]
-            logits = F.linear(hidden_states, self.weight, None)                                 # 无偏置项
-            
-            # 将分数转换为概率分布
-            if self.scoring_func == 'softmax':
-                scores = logits.softmax(dim=-1)                                                 # 按最后一个维度做Softmax
-            else:
-                raise NotImplementedError(f"不支持的专家评分函数: {self.scoring_func}")
+        # 输入形状: (batch_size, seq_len, hidden_dim)
+        # hidden_states表示输入的特征张量，通常是Transformer层的输出
+        batch_size, seq_len, h = hidden_states.shape
+        
+        # 将输入展平为 (batch_size*seq_len, hidden_dim)
+        hidden_states = hidden_states.view(-1, h)
 
-            # 选择Top-K专家 [value, indices]
-            topk_weight, topk_idx = torch.topk(
-                scores, 
-                k=self.top_k, 
-                dim=-1, 
-                sorted=False                                                                    # 不排序以提高效率
-            )
+        # 计算原始分数：将张量与专家权重矩阵相乘，无偏置项
+        logits = F.linear(hidden_states, self.weight, bias=None)
 
-            # 权重归一化（当选择多个专家时）
-            if self.top_k > 1 and self.norm_topk_prob:
-                denominator = topk_weight.sum(dim=-1, keepdim=True) + 1e-20                     # 防止除零
-                topk_weight = topk_weight / denominator                                         # 归一化权重和为1
+        # 将分数转换为概率分布
+        if self.scoring_func == 'softmax':
+            scores = logits.softmax(dim=-1)                                                 # 按最后一个维度做Softmax
+        else:
+            raise NotImplementedError(f"不支持的专家评分函数: {self.scoring_func}")
 
-            # 辅助损失计算（仅在训练时且alpha>0时激活）
-            if self.training and self.alpha > 0.0:
-                scores_for_aux = scores                                                         # 原始概率分数
+        # 选择Top-K专家 [value, indices]
+        topk_weight, topk_idx = torch.topk(
+            scores, 
+            k=self.top_k, 
+            dim=-1, 
+            sorted=False                                                                    # 不排序以提高效率
+        )
+
+        # 权重归一化（当选择多个专家时）
+        if self.top_k > 1 and self.norm_topk_prob:
+            denominator = topk_weight.sum(dim=-1, keepdim=True) + 1e-20                     # 防止除零
+            topk_weight = topk_weight / denominator                                         # 归一化权重和为1
+
+        # 辅助损失计算（仅在训练时且alpha>0时激活）
+        if self.training and self.alpha > 0.0:
+            scores_for_aux = scores                                                         # 原始概率分数
+            
+            # 序列级辅助损失（平衡每个序列内的专家使用）
+            if self.seq_aux:
+                scores_for_seq_aux = scores_for_aux.view(batch_size, seq_len, -1)                  # [batch_size, seq_len, n_experts]
+                ce = torch.zeros(batch_size, self.n_routed_experts, device=hidden_states.device)
                 
-                # 序列级辅助损失（平衡每个序列内的专家使用）
-                if self.seq_aux:
-                    scores_for_seq_aux = scores_for_aux.view(batch_size, seq_len, -1)                  # [batch_size, seq_len, n_experts]
-                    ce = torch.zeros(batch_size, self.n_routed_experts, device=hidden_states.device)
-                    
-                    # 统计每个专家在batch中被选中的次数
-                    ce.scatter_add_(
-                        1, 
-                        topk_idx.view(batch_size, -1),                                                 # [batch_size, seq_len*top_k]
-                        torch.ones(batch_size, seq_len * self.top_k, device=hidden_states.device)
-                    ).div_(seq_len * self.top_k / self.n_routed_experts)                        # 归一化为频率
-                    
-                    # 计算损失：专家使用频率与平均分数的乘积
-                    aux_loss = (ce * scores_for_seq_aux.mean(dim=1)).sum(dim=1).mean() * self.alpha
+                # 统计每个专家在一个batch中被选中的次数：也就是在一个序列中被选中多个次数
+                ce.scatter_add_(
+                    1, 
+                    topk_idx.view(batch_size, -1),                                                 # [batch_size, seq_len*top_k]
+                    torch.ones(batch_size, seq_len * self.top_k, device=hidden_states.device)
+                ).div_(seq_len * self.top_k / self.n_routed_experts)                        # 归一化为频率
                 
-                # Token级辅助损失（全局平衡专家使用）
-                else:
-                    # 生成one-hot编码的专家选择掩码
-                    mask_ce = F.one_hot(
-                        topk_idx.view(-1),                                                      # 展平所有选择的专家索引
-                        num_classes=self.n_routed_experts
-                    )
-                    ce = mask_ce.float().mean(0)                                                # 计算每个专家的平均被选概率
-                    Pi = scores_for_aux.mean(0)                                                 # 计算每个专家的平均激活概率
-                    fi = ce * self.n_routed_experts                                             # 理想均匀分布下的期望值
-                    
-                    # 计算损失：实际分布与理想分布的协方差
-                    aux_loss = (Pi * fi).sum() * self.alpha
+                # 计算损失：专家使用频率与平均分数的乘积
+                aux_loss = (ce * scores_for_seq_aux.mean(dim=1)).sum(dim=1).mean() * self.alpha
+            
+            # Token级辅助损失（全局平衡专家使用）
             else:
-                aux_loss = 0                                                                    # 无辅助损失
+                # 生成one-hot编码的专家选择掩码
+                mask_ce = F.one_hot(
+                    topk_idx.view(-1),                                                      # 展平所有选择的专家索引
+                    num_classes=self.n_routed_experts
+                )
+                ce = mask_ce.float().mean(0)                                                # 计算每个专家的平均被选概率
+                Pi = scores_for_aux.mean(0)                                                 # 计算每个专家的平均激活概率
+                fi = ce * self.n_routed_experts                                             # 理想均匀分布下的期望值
+                
+                # 计算损失：实际分布与理想分布的协方差
+                aux_loss = (Pi * fi).sum() * self.alpha
+        else:
+            aux_loss = 0                                                                    # 无辅助损失
 
-            return topk_idx, topk_weight, aux_loss                                              # 返回专家索引、权重和损失
+        return topk_idx, topk_weight, aux_loss                                              # 返回专家索引、权重和损失
 
 class MOEFeedForward(nn.Module):
     def __init__(self, config: MicroLMConfig):
@@ -375,6 +407,7 @@ class MircoLLMBlock(nn.Module):
         # 初始化多头注意力参数
         self.n_heads = config.n_heads
         self.dim = config.dim
+        # 计算每个头的维度
         self.head_dim = config.dim // config.n_heads
         
         # 核心模块定义
@@ -422,7 +455,7 @@ class MicroLM(PreTrainedModel):
         # 正则化层
         self.dropout = nn.Dropout(params.dropout)
         
-        # 构建Transformer层堆栈
+        # 构建Transformer的解码器堆栈：一个MircoLLMBlock相当于一个Transformer解码器层
         self.layers = nn.ModuleList([
             MircoLLMBlock(l, params) for l in range(self.n_layers)
         ])
@@ -466,6 +499,7 @@ class MicroLM(PreTrainedModel):
         # 逐层处理
         past_kvs = []
         for l, layer in enumerate(self.layers):
+            # 每层都会更新h
             h, past_kv = layer(
                 h, 
                 pos_cis,

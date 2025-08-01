@@ -209,7 +209,7 @@ if __name__ == '__main__':
     # 初始化模型
     model, tokenizer = init_model(lm_config, args)
 
-    # 应用LoRA
+    # 应用LoRA，为所有线性层添加LoRA
     apply_LoRA(model)
     
     total_params = sum(p.numel() for p in model.parameters())                                       # 总参数数量

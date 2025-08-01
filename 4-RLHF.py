@@ -48,11 +48,12 @@ def logits_to_probs(logits, labels):
 # RLHF 损失函数
 # ref_probs 和 probs 都是 shape: (batch_size, seq_len)
 def RLHF_loss(ref_probs, probs, beta):
-    # 计算每个样本的平均概率
-    ref_probs = ref_probs.mean(dim=1)
-    probs = probs.mean(dim=1)
+    # 计算每个样本的平均概率，
+    ref_probs = ref_probs.mean(dim=1)                       # 参考模型输出的概率，参考模型是指大型模型或教师模型
+    probs = probs.mean(dim=1)                               # 当前模型输出的概率，当前模型是指小型模型或学生模型
 
     # 将 chosen 和 rejected 数据分开
+    # 这么分开始因为前半部分是 chosen 数据，后半部分是 rejected 数据
     batch_size = ref_probs.shape[0]
     chosen_ref_probs = ref_probs[:batch_size // 2]
     reject_ref_probs = ref_probs[batch_size // 2:]

@@ -7,7 +7,7 @@ class MicroLMConfig(PretrainedConfig):
             self,
             dim: int = 512,                                         # 模型维度
             n_layers: int = 8,                                      # 层数
-            n_heads: int = 8,                                       # 多头注意力头数
+            n_heads: int = 8,                                       # 多头注意力中的头数
             n_kv_heads: int = 2,                                    # 多头注意力中的key和value头数
             vocab_size: int = 6400,                                 # 词表大小
             hidden_dim: int = None,                                 # 隐藏层维度

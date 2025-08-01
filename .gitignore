@@ -1,0 +1,8 @@
+# python中间文件
+__pycache__/
+
+# 数据集
+/model/dataset/
+
+# 模型文件
+/model_weight/
